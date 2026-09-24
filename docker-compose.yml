@@ -1,0 +1,62 @@
+version: '3.8'
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: ecommerce_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: R00t_S3cur3_P@ss!
+      MYSQL_DATABASE: ecommerce_db
+      MYSQL_USER: app_user
+      MYSQL_PASSWORD: App_Us3r_P@ss!
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./01_Esquema_y_Datos.sql:/docker-entrypoint-initdb.d/01_Esquema_y_Datos.sql
+      - ./03_Funciones.sql:/docker-entrypoint-initdb.d/02_Funciones.sql
+      - ./05_Triggers.sql:/docker-entrypoint-initdb.d/03_Triggers.sql
+      - ./06_Eventos.sql:/docker-entrypoint-initdb.d/04_Eventos.sql
+      - ./07_Procedimientos_Almacenados.sql:/docker-entrypoint-initdb.d/05_Procedimientos.sql
+      - ./04_Seguridad.sql:/docker-entrypoint-initdb.d/06_Seguridad.sql
+    command: >
+      --default-authentication-plugin=mysql_native_password
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --event-scheduler=ON
+      --log-error-verbosity=3
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pR00t_S3cur3_P@ss!"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - ecommerce_network
+
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin:latest
+    container_name: ecommerce_phpmyadmin
+    restart: unless-stopped
+    environment:
+      PMA_HOST: mysql
+      PMA_PORT: 3306
+      PMA_USER: root
+      PMA_PASSWORD: R00t_S3cur3_P@ss!
+      UPLOAD_LIMIT: 100M
+    ports:
+      - "8080:80"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - ecommerce_network
+
+volumes:
+  mysql_data:
+    driver: local
+
+networks:
+  ecommerce_network:
+    driver: bridge
