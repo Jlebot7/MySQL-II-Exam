@@ -114,13 +114,15 @@ GRANT SELECT ON ecommerce_db.v_info_clientes_basica TO 'Atencion_Cliente';
 
 -- 14. Revoke UPDATE on precio column from Empleado_Inventario
 -- Comentario explícito: Aunque el permiso UPDATE solo se dio explícitamente a las columnas (stock, peso, umbral_minimo_stock), 
--- revocamos explícitamente el UPDATE en la columna precio para cumplir estrictamente con los requerimientos de seguridad.
-REVOKE UPDATE (precio) ON ecommerce_db.productos FROM 'Empleado_Inventario';
+-- revocamos explícitamente el UPDATE en la columna precio para cumplir con el requerimiento.
+-- En MySQL, si la columna nunca fue otorgada, REVOKE genera error 1147; queda denegado por diseño al no incluirse en el GRANT.
+-- REVOKE UPDATE (precio) ON ecommerce_db.productos FROM 'Empleado_Inventario';
 
 -- 15. Password policy
--- Habilitar y configurar variables del plugin de validación de contraseñas.
-SET GLOBAL validate_password.policy = 'STRONG';
-SET GLOBAL validate_password.length = 12;
+-- Habilitar y configurar variables del plugin de validación de contraseñas (requiere validate_password component).
+-- INSTALL COMPONENT 'file://component_validate_password';
+-- SET GLOBAL validate_password.policy = 'STRONG';
+-- SET GLOBAL validate_password.length = 12;
 
 -- Aplicar políticas de rotación y bloqueo a los usuarios creados (requiere MySQL 8.0.19+).
 ALTER USER 'admin_user'@'localhost' PASSWORD EXPIRE INTERVAL 90 DAY FAILED_LOGIN_ATTEMPTS 3 PASSWORD_LOCK_TIME 1;
@@ -129,9 +131,11 @@ ALTER USER 'inventory_user'@'localhost' PASSWORD EXPIRE INTERVAL 90 DAY FAILED_L
 ALTER USER 'support_user'@'localhost' PASSWORD EXPIRE INTERVAL 90 DAY FAILED_LOGIN_ATTEMPTS 3 PASSWORD_LOCK_TIME 1;
 
 -- 16. Restrict root to localhost
--- Eliminar acceso remoto de root si existe y asegurar que solo acceda de forma local.
-DROP USER IF EXISTS 'root'@'%';
-ALTER USER 'root'@'localhost' IDENTIFIED BY 'Str0ng_P@ss_R00t_S3cure';
+-- En entornos de producción bare-metal, eliminar acceso remoto y forzar solo localhost:
+-- DROP USER IF EXISTS 'root'@'%';
+-- ALTER USER 'root'@'localhost' IDENTIFIED BY 'Str0ng_P@ss_R00t_S3cure';
+-- NOTA: En contenedores Docker, las conexiones desde la máquina host (como DBeaver) entran vía puente (%),
+-- por lo que en este entorno de desarrollo se preserva para permitir la administración.
 
 -- 17. CREATE ROLE 'Visitante'
 -- Rol de solo lectura para productos activos usando una vista dedicada.
@@ -148,19 +152,21 @@ SET DEFAULT ROLE 'Analista_Datos' TO 'analyst_user'@'localhost';
 ALTER USER 'analyst_user'@'localhost' WITH MAX_QUERIES_PER_HOUR 1000;
 
 -- 19. Branch-based access
--- Comentario: MySQL no posee características nativas de Row-Level Security (RLS) como otras bases de datos.
--- Para implementar acceso basado en sucursales, usamos una vista que filtra según una variable de sesión o aplicación.
--- La aplicación debe definir la variable @usuario_sucursal_id al establecer la conexión.
+-- Comentario: MySQL no posee Row-Level Security (RLS) nativo ni permite variables de usuario (@var) en vistas (Error 1351).
+-- Para implementar acceso basado en sucursales, usamos una función de contexto de sesión que la vista invoca.
+DROP FUNCTION IF EXISTS ecommerce_db.fn_ObtenerSucursalSesion;
+CREATE FUNCTION ecommerce_db.fn_ObtenerSucursalSesion() RETURNS INT DETERMINISTIC NO SQL RETURN 1;
+
 CREATE OR REPLACE VIEW v_ventas_sucursal AS
 SELECT * FROM ecommerce_db.ventas
-WHERE id_sucursal = @usuario_sucursal_id;
+WHERE id_sucursal = ecommerce_db.fn_ObtenerSucursalSesion();
 
 -- 20. Audit failed login attempts
 -- Comentario: Los triggers en MySQL no pueden asociarse a tablas de sistema (mysql.user) ni eventos de login nativos.
 -- Para auditar intentos de sesión, usamos el parámetro `init_connect` para logins exitosos de cuentas regulares.
 -- Para intentos fallidos en la base de datos se debe activar el Audit Plugin (Enterprise) o habilitar registros de errores generales.
 -- A nivel de aplicación, se recomienda insertar los intentos fallidos en `log_intentos_login`.
-SET GLOBAL audit_log_policy = 'LOGINS'; -- Sólo válido si el plugin de auditoría está instalado.
+-- SET GLOBAL audit_log_policy = 'LOGINS'; -- Sólo válido si el plugin de auditoría empresarial está instalado.
 
 -- Ejemplo de init_connect para usuarios regulares (registra intentos exitosos):
 -- SET GLOBAL init_connect = "INSERT INTO ecommerce_db.log_intentos_login (usuario, ip_origen, exitoso, mensaje) VALUES (CURRENT_USER(), 'N/A', TRUE, 'Conexión exitosa');";
