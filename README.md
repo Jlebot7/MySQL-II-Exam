@@ -6,11 +6,7 @@ Este proyecto implementa el diseño completo de una base de datos relacional par
 
 ## Integrantes
 
-| # | Nombre Completo |
-|---|----------------|
-| 1 | _[Nombre del integrante 1]_ |
-| 2 | _[Nombre del integrante 2]_ |
-| 3 | _[Nombre del integrante 3]_ |
+| # | Juan Camilo Leal Castellanos |
 
 > **Nota:** Reemplazar los nombres de ejemplo con los nombres reales de los integrantes del equipo.
 
