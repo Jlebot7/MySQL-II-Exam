@@ -57,3 +57,4 @@ INSERT INTO clientes (id_cliente, nombre, apellido, email, contraseña, direccio
 (3, 'José', 'Muñoz', 'jose.munoz@test.com', SHA2('Password123!', 256), 'Calle Córdoba 12', 'Sevilla', 'Andalucía', 1),
 (4, 'María', 'López', 'maria.lopez@test.com', SHA2('Password123!', 256), 'Avenida Siempreviva 742', 'Valencia', 'Comunidad Valenciana', 1),
 (5, 'Iñaki', 'Ñandú', 'inaki.nandu@test.com', SHA2('Password123!', 256), 'Plaza de España 1', 'Zaragoza', 'Aragón', 1);
+
