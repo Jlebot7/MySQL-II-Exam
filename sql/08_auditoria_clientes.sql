@@ -124,3 +124,4 @@ DELIMITER ;
 -- GRANT SELECT, INSERT ON ecommerce_db.Auditoria_Clientes TO 'app_user'@'%';
 -- REVOKE UPDATE, DELETE, DROP, ALTER ON ecommerce_db.Auditoria_Clientes FROM 'app_user'@'%';
 -- ---------------------------------------------------------------------
+
