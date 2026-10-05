@@ -382,3 +382,4 @@ FROM Auditoria_Clientes;
 -- =====================================================================
 SELECT 
     '=== BATERIA DE PRUEBAS COMPLETADA: 20/20 ASERCIONES VERIFICADAS ===' AS Resumen;
+
