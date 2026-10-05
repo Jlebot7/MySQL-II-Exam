@@ -61,16 +61,74 @@ Este proyecto implementa el diseño completo de una base de datos relacional par
 
 ```
 📁 Proyecto_BD_Avanzada/
-├── 📄 README.md                           ← Este archivo
-├── 📄 docker-compose.yml                  ← Configuración de Docker
+├── 📄 README.md                           ← Este archivo (documentación completa)
+├── 📄 docker-compose.yml                  ← Configuración de Docker (MySQL 8.0 + phpMyAdmin)
+├── 📁 sql/
+│   └── 📄 08_auditoria_clientes.sql       ← Script entregable: Tabla Auditoria_Clientes y trigger
+├── 📁 tests/
+│   ├── 📄 00_fixture_clientes.sql         ← Fixture mínimo: sucursales y clientes con datos de prueba
+│   └── 📄 02_tests_trigger.sql            ← Batería de 20 casos de prueba automatizados
+├── 📁 docs/
+│   ├── 📄 diseno.md                       ← Especificación arquitectónica y decisiones de diseño
+│   ├── 📄 auditoria.md                    ← Reporte de auditoría de código y seguridad (6 dimensiones)
+│   └── 📄 evidencia_pruebas.md            ← Registro crudo de ejecución en MySQL 8 (100% PASS)
 ├── 📄 01_Esquema_y_Datos.sql              ← Estructura de tablas + datos de ejemplo
 ├── 📄 02_Consultas_Avanzadas.sql          ← 20 consultas de análisis y reporteo
 ├── 📄 03_Funciones.sql                    ← 20 funciones definidas por el usuario
 ├── 📄 04_Seguridad.sql                    ← Roles, usuarios y permisos
-├── 📄 05_Triggers.sql                     ← 20 triggers + tablas de auditoría
+├── 📄 05_Triggers.sql                     ← 20 triggers + tablas de auditoría generales
 ├── 📄 06_Eventos.sql                      ← 20 eventos programados
 └── 📄 07_Procedimientos_Almacenados.sql   ← 20 procedimientos almacenados
 ```
+
+---
+
+## 🛡️ Módulo de Auditoría de Clientes (`Auditoria_Clientes`)
+
+Este módulo implementa un sistema de auditoría granular para cambios en datos sensibles de clientes (`email` y `direccion_envio`), cumpliendo con estándares de seguridad, privacidad y trazabilidad normativa.
+
+### 1. Propósito y Alcance
+- Registrar cualquier modificación en el correo electrónico o la dirección de envío de los clientes.
+- Mantener la historia inmutable con valores antiguos, valores nuevos, fecha exacta y usuario que efectuó el cambio.
+- **Fuera de alcance:** Auditoría de `INSERT` y `DELETE` (recomendado para fases futuras).
+
+### 2. Decisiones de Diseño Críticas
+- **Sin Llave Foránea (FK):** `Auditoria_Clientes.id_cliente` NO posee una FK hacia `clientes` para que la evidencia histórica sobreviva a la eliminación física del cliente (cumplimiento legal/compliance).
+- **Identificador `BIGINT`:** Previene desbordamiento en entornos de alta concurrencia.
+- **Campos de Valor `TEXT`:** Alojan sin riesgo de truncamiento tanto correos (`VARCHAR(200)`) como direcciones extensas (`TEXT`).
+- **Comparación Binaria (`CAST(... AS BINARY)`):** MySQL utiliza por defecto colaciones `_ci` (case-insensitive / accent-insensitive) y `PAD SPACE`. Para evitar falsos negativos en cambios de capitalización (`Ana@test.com` → `ana@test.com`), acentos (`José` → `Jose`) o espacios finales (`Calle 1` → `Calle 1   `), se utiliza semántica binaria byte a byte con operador NULL-safe (`<=>`).
+- **Exclusión Estricta de `contraseña`:** El trigger **nunca** lee, compara ni registra el campo de contraseña bajo ningún concepto (protección de credenciales y prevención de fugas de PII).
+- **Independencia en Cambios Simultáneos:** Si se modifican `email` y `direccion_envio` en un mismo `UPDATE`, se generan **dos filas** independientes de auditoría para máxima granularidad.
+
+### 3. Sensibilidad a Mayúsculas en Nombres de Tablas
+> ⚠️ **IMPORTANTE:** La tabla fuente se llama en minúsculas: `clientes`. La tabla de auditoría se llama en formato mixto: `Auditoria_Clientes`. En sistemas basados en Linux (`lower_case_table_names = 0`), MySQL distingue estrictamente entre mayúsculas y minúsculas. Las sentencias deben respetar esta capitalización exacta.
+
+### 4. Supuestos Documentados
+- **Motor:** MySQL 8.0+ con motor de almacenamiento `InnoDB` y codificación `utf8mb4`.
+- **Transaccionalidad:** Al operar bajo InnoDB, las inserciones de auditoría forman parte de la transacción del `UPDATE`. Un `ROLLBACK` revierte también las filas de auditoría.
+- **Codificación:** Obligatorio ejecutar clientes con `--default-character-set=utf8mb4` debido a la presencia de caracteres especiales (ñ, acentos, emojis).
+
+### 5. Cómo Ejecutar el Script y las Pruebas
+
+#### Aplicar el Script de Auditoría:
+```bash
+docker exec -i ecommerce_mysql mysql -u root -pR00t_S3cur3_P@ss! --default-character-set=utf8mb4 ecommerce_db < sql/08_auditoria_clientes.sql
+```
+
+#### Ejecutar la Batería Completa de Pruebas:
+```bash
+# 1. Cargar el fixture inicial
+docker exec -i ecommerce_mysql mysql -u root -pR00t_S3cur3_P@ss! --default-character-set=utf8mb4 ecommerce_db < tests/00_fixture_clientes.sql
+
+# 2. Aplicar el trigger
+docker exec -i ecommerce_mysql mysql -u root -pR00t_S3cur3_P@ss! --default-character-set=utf8mb4 ecommerce_db < sql/08_auditoria_clientes.sql
+
+# 3. Ejecutar las 20 aserciones
+docker exec -i ecommerce_mysql mysql -u root -pR00t_S3cur3_P@ss! --default-character-set=utf8mb4 ecommerce_db < tests/02_tests_trigger.sql
+```
+
+Resultado esperado: **20/20 PASS (100% de éxito)**. Consultar [`docs/evidencia_pruebas.md`](docs/evidencia_pruebas.md) para la salida cruda.
+
 
 ## Instrucciones de Ejecución
 
