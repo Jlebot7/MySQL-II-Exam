@@ -55,9 +55,10 @@ GRANT SELECT ON ecommerce_db.productos TO 'Empleado_Inventario';
 GRANT UPDATE (stock, peso, umbral_minimo_stock) ON ecommerce_db.productos TO 'Empleado_Inventario';
 
 -- 5. CREATE ROLE 'Atencion_Cliente'
--- Crear rol Atencion_Cliente y asignar SELECT en entidades clave para soporte (sin UPDATE en precio).
+-- Crear rol Atencion_Cliente y asignar SELECT en entidades operativas.
+-- NOTA DE SEGURIDAD: NO se otorga SELECT en la tabla base 'clientes' para proteger 'contraseña'
+-- y datos confidenciales. El acceso a clientes se otorga exclusivamente mediante la vista 'v_info_clientes_basica'.
 CREATE ROLE IF NOT EXISTS 'Atencion_Cliente';
-GRANT SELECT ON ecommerce_db.clientes TO 'Atencion_Cliente';
 GRANT SELECT ON ecommerce_db.ventas TO 'Atencion_Cliente';
 GRANT SELECT ON ecommerce_db.detalle_ventas TO 'Atencion_Cliente';
 GRANT SELECT ON ecommerce_db.productos TO 'Atencion_Cliente';
@@ -138,10 +139,12 @@ ALTER USER 'support_user'@'localhost' PASSWORD EXPIRE INTERVAL 90 DAY FAILED_LOG
 -- por lo que en este entorno de desarrollo se preserva para permitir la administración.
 
 -- 17. CREATE ROLE 'Visitante'
--- Rol de solo lectura para productos activos usando una vista dedicada.
+-- Rol de solo lectura para productos activos usando una vista dedicada (oculta costo de proveedor).
 CREATE ROLE IF NOT EXISTS 'Visitante';
 CREATE OR REPLACE VIEW v_productos_publicos AS
-SELECT * FROM ecommerce_db.productos WHERE activo = TRUE;
+SELECT id_producto, nombre, descripcion, precio, stock, sku, peso, id_categoria, fecha_creacion
+FROM ecommerce_db.productos 
+WHERE activo = TRUE;
 GRANT SELECT ON ecommerce_db.v_productos_publicos TO 'Visitante';
 
 -- 18. Limit queries per hour for Analista_Datos
@@ -158,7 +161,8 @@ DROP FUNCTION IF EXISTS ecommerce_db.fn_ObtenerSucursalSesion;
 CREATE FUNCTION ecommerce_db.fn_ObtenerSucursalSesion() RETURNS INT DETERMINISTIC NO SQL RETURN 1;
 
 CREATE OR REPLACE VIEW v_ventas_sucursal AS
-SELECT * FROM ecommerce_db.ventas
+SELECT id_venta, id_cliente, fecha_venta, estado, total, id_sucursal
+FROM ecommerce_db.ventas
 WHERE id_sucursal = ecommerce_db.fn_ObtenerSucursalSesion();
 
 -- 20. Audit failed login attempts

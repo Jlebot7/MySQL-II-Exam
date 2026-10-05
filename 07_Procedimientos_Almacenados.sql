@@ -20,7 +20,7 @@ BEGIN
     DECLARE v_stock INT;
     DECLARE done INT DEFAULT FALSE;
     
-    -- Cursor y manejador
+    -- Cursor ordenado por id_producto ASC para garantizar adquisición determinística de bloqueos (previene deadlocks)
     DECLARE cur CURSOR FOR 
         SELECT id_producto, cantidad 
         FROM JSON_TABLE(
@@ -29,7 +29,8 @@ BEGIN
                 id_producto INT PATH '$.id_producto',
                 cantidad INT PATH '$.cantidad'
             )
-        ) AS jt;
+        ) AS jt
+        ORDER BY id_producto ASC;
     
     DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = TRUE;
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
@@ -138,6 +139,9 @@ DELIMITER ;
 -- 4. sp_ProcesarDevolucion
 -- Descripción: Procesa la devolución de un producto, ajusta stock y venta.
 -- =====================================================================
+-- 4. sp_ProcesarDevolucion
+-- Descripción: Procesa la devolución de un producto, ajusta stock y venta sin violar CHECK (cantidad > 0).
+-- =====================================================================
 DROP PROCEDURE IF EXISTS sp_ProcesarDevolucion;
 DELIMITER $$
 CREATE PROCEDURE sp_ProcesarDevolucion(
@@ -156,28 +160,40 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Error al procesar la devolución.';
     END;
 
+    IF p_cantidad <= 0 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'La cantidad a devolver debe ser mayor a cero.';
+    END IF;
+
     START TRANSACTION;
 
     SELECT cantidad, precio_unitario_congelado 
     INTO v_cantidad_vendida, v_precio_unitario 
     FROM detalle_ventas 
-    WHERE id_venta = p_id_venta AND id_producto = p_id_producto;
+    WHERE id_venta = p_id_venta AND id_producto = p_id_producto
+    FOR UPDATE;
 
     IF v_cantidad_vendida IS NULL OR v_cantidad_vendida < p_cantidad THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Cantidad inválida para devolución.';
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Cantidad inválida para devolución o producto no encontrado en la venta.';
     END IF;
 
-    UPDATE productos SET stock = stock + p_cantidad WHERE id_producto = p_id_producto;
+    -- Ajustar la línea de detalle_ventas respetando CHECK (cantidad > 0)
+    -- Los triggers trg_adjust_stock_after_update_detalle / trg_restore_stock_after_delete_detalle
+    -- se encargarán de restaurar el stock automáticamente de forma coherente.
+    IF v_cantidad_vendida = p_cantidad THEN
+        DELETE FROM detalle_ventas WHERE id_venta = p_id_venta AND id_producto = p_id_producto;
+    ELSE
+        UPDATE detalle_ventas 
+        SET cantidad = cantidad - p_cantidad 
+        WHERE id_venta = p_id_venta AND id_producto = p_id_producto;
+    END IF;
 
-    INSERT INTO detalle_ventas (id_venta, id_producto, cantidad, precio_unitario_congelado)
-    VALUES (p_id_venta, p_id_producto, -p_cantidad, v_precio_unitario);
-
+    -- Descontar del total de la venta
     UPDATE ventas SET total = total - (p_cantidad * v_precio_unitario) WHERE id_venta = p_id_venta;
 
     SELECT total INTO v_total_actual FROM ventas WHERE id_venta = p_id_venta;
     
     IF v_total_actual <= 0 THEN
-        UPDATE ventas SET estado = 'Devuelto' WHERE id_venta = p_id_venta;
+        UPDATE ventas SET total = 0.00, estado = 'Devuelto' WHERE id_venta = p_id_venta;
     END IF;
 
     COMMIT;
@@ -223,26 +239,37 @@ DELIMITER ;
 
 -- =====================================================================
 -- 7. sp_EliminarClienteDeFormaSegura
--- Descripción: Anonimiza y desactiva un cliente en lugar de borrarlo físicamente.
+-- Descripción: Anonimiza y desactiva un cliente de forma transaccional en lugar de borrarlo físicamente.
 -- =====================================================================
 DROP PROCEDURE IF EXISTS sp_EliminarClienteDeFormaSegura;
 DELIMITER $$
 CREATE PROCEDURE sp_EliminarClienteDeFormaSegura(IN p_id_cliente INT)
 BEGIN
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Error al anonimizar el cliente.';
+    END;
+
+    START TRANSACTION;
+
     UPDATE clientes 
     SET nombre = 'ELIMINADO', 
         apellido = 'ELIMINADO', 
         email = CONCAT('deleted_', id_cliente, '@removed.com'), 
-        contraseña = '', 
+        `contraseña` = '', 
         direccion_envio = NULL, 
         activo = FALSE 
     WHERE id_cliente = p_id_cliente;
+
+    COMMIT;
 END $$
 DELIMITER ;
 
 -- =====================================================================
 -- 8. sp_AplicarDescuentoPorCategoria
 -- Descripción: Aplica un descuento porcentual a todos los productos activos de una categoría.
+-- Nota: La auditoría se delega al trigger trg_audit_precio_producto_after_update para evitar duplicados.
 -- =====================================================================
 DROP PROCEDURE IF EXISTS sp_AplicarDescuentoPorCategoria;
 DELIMITER $$
@@ -257,12 +284,11 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Error al aplicar el descuento.';
     END;
 
-    START TRANSACTION;
+    IF p_porcentaje <= 0.00 OR p_porcentaje > 100.00 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'El porcentaje debe ser mayor a 0 y menor o igual a 100.';
+    END IF;
 
-    INSERT INTO log_cambios_precio (id_producto, precio_anterior, precio_nuevo, usuario)
-    SELECT id_producto, precio, precio * (1 - p_porcentaje / 100), 'admin'
-    FROM productos 
-    WHERE id_categoria = p_id_categoria AND activo = TRUE;
+    START TRANSACTION;
 
     UPDATE productos 
     SET precio = precio * (1 - p_porcentaje / 100) 
@@ -299,7 +325,7 @@ DELIMITER ;
 
 -- =====================================================================
 -- 10. sp_CambiarEstadoPedido
--- Descripción: Cambia el estado de una venta validando lógica básica de transición.
+-- Descripción: Cambia el estado de una venta validando máquina de estados completa y bloqueos concurrentes.
 -- =====================================================================
 DROP PROCEDURE IF EXISTS sp_CambiarEstadoPedido;
 DELIMITER $$
@@ -310,13 +336,40 @@ CREATE PROCEDURE sp_CambiarEstadoPedido(
 BEGIN
     DECLARE v_estado_actual VARCHAR(50);
     
-    SELECT estado INTO v_estado_actual FROM ventas WHERE id_venta = p_id_venta;
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Error al cambiar estado de la venta.';
+    END;
+
+    START TRANSACTION;
+
+    SELECT estado INTO v_estado_actual 
+    FROM ventas 
+    WHERE id_venta = p_id_venta 
+    FOR UPDATE;
     
-    IF v_estado_actual = 'Entregado' AND p_nuevo_estado = 'Pendiente de Pago' THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Transición de estado inválida.';
+    IF v_estado_actual IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'La venta especificada no existe.';
+    END IF;
+
+    -- Validaciones de máquina de estados
+    IF v_estado_actual = 'Cancelado' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Una venta cancelada no puede cambiar de estado.';
+    END IF;
+    IF v_estado_actual = 'Devuelto' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Una venta devuelta no puede cambiar de estado.';
+    END IF;
+    IF v_estado_actual = 'Entregado' AND p_nuevo_estado != 'Devuelto' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Una venta entregada solo puede pasar a estado Devuelto.';
+    END IF;
+    IF v_estado_actual = 'Pagado' AND p_nuevo_estado = 'Pendiente de Pago' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'No se puede revertir una venta pagada a Pendiente de Pago.';
     END IF;
 
     UPDATE ventas SET estado = p_nuevo_estado WHERE id_venta = p_id_venta;
+
+    COMMIT;
 END $$
 DELIMITER ;
 
@@ -345,7 +398,7 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'El email ya está registrado.';
     END IF;
 
-    INSERT INTO clientes (nombre, apellido, email, contraseña, direccion_envio, ciudad, region, fecha_nacimiento)
+    INSERT INTO clientes (nombre, apellido, email, `contraseña`, direccion_envio, ciudad, region, fecha_nacimiento)
     VALUES (p_nombre, p_apellido, p_email, SHA2(p_contrasena, 256), p_direccion, p_ciudad, p_region, p_fecha_nacimiento);
 END $$
 DELIMITER ;
@@ -370,7 +423,7 @@ DELIMITER ;
 
 -- =====================================================================
 -- 13. sp_FusionarCuentasCliente
--- Descripción: Fusiona dos cuentas de cliente transfiriendo ventas, carritos y reseñas.
+-- Descripción: Fusiona dos cuentas de cliente transfiriendo ventas, carritos y reseñas sin violar restricciones UNIQUE.
 -- =====================================================================
 DROP PROCEDURE IF EXISTS sp_FusionarCuentasCliente;
 DELIMITER $$
@@ -391,8 +444,19 @@ BEGIN
 
     SELECT total_gastado INTO v_total_gastado_duplicado FROM clientes WHERE id_cliente = p_id_cliente_duplicado;
 
+    -- Transferir ventas
     UPDATE ventas SET id_cliente = p_id_cliente_principal WHERE id_cliente = p_id_cliente_duplicado;
+    
+    -- Manejar carritos: eliminar del duplicado los artículos que el principal ya tenga en su carrito
+    DELETE c_dup FROM carritos c_dup 
+    JOIN carritos c_pri ON c_dup.id_producto = c_pri.id_producto AND c_pri.id_cliente = p_id_cliente_principal
+    WHERE c_dup.id_cliente = p_id_cliente_duplicado;
     UPDATE carritos SET id_cliente = p_id_cliente_principal WHERE id_cliente = p_id_cliente_duplicado;
+
+    -- Manejar reseñas: eliminar del duplicado las reseñas sobre productos que el principal ya reseñó
+    DELETE r_dup FROM resenas r_dup 
+    JOIN resenas r_pri ON r_dup.id_producto = r_pri.id_producto AND r_pri.id_cliente = p_id_cliente_principal
+    WHERE r_dup.id_cliente = p_id_cliente_duplicado;
     UPDATE resenas SET id_cliente = p_id_cliente_principal WHERE id_cliente = p_id_cliente_duplicado;
     
     UPDATE clientes 
@@ -470,7 +534,7 @@ DELIMITER ;
 
 -- =====================================================================
 -- 17. sp_ProcesarPago
--- Descripción: Valida que una venta esté pendiente y cambia su estado a pagado.
+-- Descripción: Valida que una venta esté pendiente, cambia su estado a Pagado y registra el pago.
 -- =====================================================================
 DROP PROCEDURE IF EXISTS sp_ProcesarPago;
 DELIMITER $$
@@ -480,22 +544,42 @@ CREATE PROCEDURE sp_ProcesarPago(
 )
 BEGIN
     DECLARE v_estado VARCHAR(50);
+    DECLARE v_total DECIMAL(12,2);
     
-    SELECT estado INTO v_estado FROM ventas WHERE id_venta = p_id_venta;
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Error al procesar el pago.';
+    END;
+
+    START TRANSACTION;
+
+    SELECT estado, total INTO v_estado, v_total 
+    FROM ventas 
+    WHERE id_venta = p_id_venta 
+    FOR UPDATE;
     
+    IF v_estado IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'La venta especificada no existe.';
+    END IF;
+
     IF v_estado != 'Pendiente de Pago' THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'La venta no está pendiente de pago.';
     END IF;
 
     UPDATE ventas SET estado = 'Pagado' WHERE id_venta = p_id_venta;
     
-    -- Se podría registrar el método de pago si existiese la tabla pagos.
+    -- Registrar formalmente la transacción en la tabla pagos
+    INSERT INTO pagos (id_venta, metodo_pago, monto, fecha_pago)
+    VALUES (p_id_venta, p_metodo_pago, v_total, NOW());
+
+    COMMIT;
 END $$
 DELIMITER ;
 
 -- =====================================================================
 -- 18. sp_AnadirResenaProducto
--- Descripción: Agrega una reseña a un producto validando que el cliente lo haya comprado.
+-- Descripción: Agrega una reseña a un producto validando compra previa y rango de calificación.
 -- =====================================================================
 DROP PROCEDURE IF EXISTS sp_AnadirResenaProducto;
 DELIMITER $$
@@ -506,6 +590,11 @@ CREATE PROCEDURE sp_AnadirResenaProducto(
     IN p_comentario TEXT
 )
 BEGIN
+    -- Validación temprana de rango de calificación
+    IF p_calificacion < 1 OR p_calificacion > 5 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'La calificación debe estar entre 1 y 5.';
+    END IF;
+
     IF NOT EXISTS (
         SELECT 1 FROM detalle_ventas dv
         JOIN ventas v ON dv.id_venta = v.id_venta
@@ -547,7 +636,7 @@ DELIMITER ;
 
 -- =====================================================================
 -- 20. sp_MoverProductosEntreCategorias
--- Descripción: Mueve todos los productos de una categoría a otra actualizando conteos.
+-- Descripción: Mueve todos los productos de una categoría a otra delegando conteos a triggers.
 -- =====================================================================
 DROP PROCEDURE IF EXISTS sp_MoverProductosEntreCategorias;
 DELIMITER $$
@@ -556,8 +645,6 @@ CREATE PROCEDURE sp_MoverProductosEntreCategorias(
     IN p_id_categoria_destino INT
 )
 BEGIN
-    DECLARE v_num_movidos INT;
-    
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
         ROLLBACK;
@@ -573,12 +660,8 @@ BEGIN
 
     START TRANSACTION;
 
-    SELECT COUNT(*) INTO v_num_movidos FROM productos WHERE id_categoria = p_id_categoria_origen;
-
+    -- Los triggers trg_update_cat_count_after_update_producto ajustan num_productos automáticamente
     UPDATE productos SET id_categoria = p_id_categoria_destino WHERE id_categoria = p_id_categoria_origen;
-
-    UPDATE categorias SET num_productos = num_productos - v_num_movidos WHERE id_categoria = p_id_categoria_origen;
-    UPDATE categorias SET num_productos = num_productos + v_num_movidos WHERE id_categoria = p_id_categoria_destino;
 
     COMMIT;
 END $$

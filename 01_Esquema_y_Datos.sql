@@ -62,7 +62,7 @@ CREATE TABLE clientes (
     nombre VARCHAR(100) NOT NULL,
     apellido VARCHAR(100) NOT NULL,
     email VARCHAR(200) NOT NULL UNIQUE,
-    contraseña VARCHAR(255) NOT NULL,
+    `contraseña` VARCHAR(255) NOT NULL,
     direccion_envio TEXT,
     fecha_registro DATETIME DEFAULT CURRENT_TIMESTAMP,
     fecha_nacimiento DATE,
@@ -86,7 +86,10 @@ CREATE TABLE ventas (
     total DECIMAL(12,2) DEFAULT 0.00,
     id_sucursal INT DEFAULT 1,
     CONSTRAINT fk_venta_cliente FOREIGN KEY (id_cliente) REFERENCES clientes(id_cliente),
-    CONSTRAINT fk_venta_sucursal FOREIGN KEY (id_sucursal) REFERENCES sucursales(id_sucursal)
+    CONSTRAINT fk_venta_sucursal FOREIGN KEY (id_sucursal) REFERENCES sucursales(id_sucursal),
+    INDEX idx_ventas_estado (estado),
+    INDEX idx_ventas_fecha (fecha_venta),
+    INDEX idx_ventas_cliente_fecha (id_cliente, fecha_venta)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- TABLA DETALLE_VENTAS
@@ -99,6 +102,16 @@ CREATE TABLE detalle_ventas (
     CONSTRAINT chk_cantidad_positiva CHECK (cantidad > 0),
     CONSTRAINT fk_detalle_venta FOREIGN KEY (id_venta) REFERENCES ventas(id_venta),
     CONSTRAINT fk_detalle_producto FOREIGN KEY (id_producto) REFERENCES productos(id_producto)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- TABLA PAGOS (Conciliación y Registro de Transacciones)
+CREATE TABLE pagos (
+    id_pago INT AUTO_INCREMENT PRIMARY KEY,
+    id_venta INT NOT NULL,
+    metodo_pago VARCHAR(50) NOT NULL,
+    monto DECIMAL(12,2) NOT NULL,
+    fecha_pago DATETIME DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_pago_venta FOREIGN KEY (id_venta) REFERENCES ventas(id_venta)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ============================================================
@@ -142,6 +155,7 @@ CREATE TABLE alertas (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE ventas_archivo (
+    id_archivo INT AUTO_INCREMENT PRIMARY KEY,
     id_venta INT,
     id_cliente INT,
     fecha_venta DATETIME,
@@ -218,7 +232,6 @@ CREATE TABLE resumen_ventas_diarias (
 
 CREATE TABLE ranking_productos (
     id_ranking INT AUTO_INCREMENT PRIMARY KEY,
-    id_ranking_prod INT,
     id_producto INT NOT NULL,
     total_vendido INT,
     ingresos_generados DECIMAL(14,2),
@@ -358,7 +371,7 @@ INSERT INTO productos (id_producto, nombre, descripcion, precio, costo, stock, s
 (30, 'Set de Maquillaje', 'Básico completo', 800.00, 300.00, 50, 'CAT7-PROD-030', 0.40, 7, 6);
 
 -- Clientes (25 clientes)
-INSERT INTO clientes (id_cliente, nombre, apellido, email, contraseña, direccion_envio, fecha_nacimiento, ciudad, region, id_sucursal) VALUES
+INSERT INTO clientes (id_cliente, nombre, apellido, email, `contraseña`, direccion_envio, fecha_nacimiento, ciudad, region, id_sucursal) VALUES
 (1, 'Carlos', 'García', 'carlos.garcia@email.com', SHA2('password123',256), 'Calle 1, Col Centro', '1980-05-15', 'Ciudad de México', 'CDMX', 1),
 (2, 'María', 'López', 'maria.lopez@email.com', SHA2('password123',256), 'Av Revolución 45', '1992-10-20', 'Monterrey', 'Nuevo León', 2),
 (3, 'Juan', 'Martínez', 'juan.martinez@email.com', SHA2('password123',256), 'Blvd Insurgentes 89', '1975-03-08', 'Guadalajara', 'Jalisco', 3),
@@ -494,6 +507,15 @@ JOIN (
     GROUP BY id_venta
 ) d ON v.id_venta = d.id_venta
 SET v.total = d.monto_total;
+
+-- Inserción de Pagos para ventas pagadas y entregadas
+INSERT INTO pagos (id_venta, metodo_pago, monto, fecha_pago)
+SELECT id_venta, 
+       ELT(1 + (id_venta % 4), 'Tarjeta de Crédito', 'Tarjeta de Débito', 'Transferencia SPEI', 'PayPal'),
+       total,
+       fecha_venta
+FROM ventas
+WHERE estado IN ('Pagado', 'Entregado', 'Enviado');
 
 -- Update Clientes total_gastado and fecha_ultimo_pedido (only counting valid sales: not canceled)
 UPDATE clientes c

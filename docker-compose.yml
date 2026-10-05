@@ -14,12 +14,15 @@ services:
       - "3306:3306"
     volumes:
       - mysql_data:/var/lib/mysql
+      # Scripts de inicialización automática en orden secuencial de dependencias:
       - ./01_Esquema_y_Datos.sql:/docker-entrypoint-initdb.d/01_Esquema_y_Datos.sql
       - ./03_Funciones.sql:/docker-entrypoint-initdb.d/02_Funciones.sql
       - ./05_Triggers.sql:/docker-entrypoint-initdb.d/03_Triggers.sql
       - ./06_Eventos.sql:/docker-entrypoint-initdb.d/04_Eventos.sql
       - ./07_Procedimientos_Almacenados.sql:/docker-entrypoint-initdb.d/05_Procedimientos.sql
       - ./04_Seguridad.sql:/docker-entrypoint-initdb.d/06_Seguridad.sql
+      # NOTA: 02_Consultas_Avanzadas.sql se omite intencionalmente aquí ya que contiene
+      # consultas analíticas SELECT para ejecución bajo demanda en DBeaver o phpMyAdmin.
     command: >
       --default-authentication-plugin=mysql_native_password
       --character-set-server=utf8mb4

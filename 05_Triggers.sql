@@ -107,6 +107,35 @@ BEGIN
 END $$
 DELIMITER ;
 
+-- 3b. Trigger para restaurar el stock al eliminar un detalle de venta
+DROP TRIGGER IF EXISTS trg_restore_stock_after_delete_detalle;
+DELIMITER $$
+CREATE TRIGGER trg_restore_stock_after_delete_detalle
+AFTER DELETE ON detalle_ventas
+FOR EACH ROW
+BEGIN
+    UPDATE productos 
+    SET stock = stock + OLD.cantidad 
+    WHERE id_producto = OLD.id_producto;
+END $$
+DELIMITER ;
+
+-- 3c. Trigger para ajustar el stock al modificar la cantidad de un detalle de venta
+DROP TRIGGER IF EXISTS trg_adjust_stock_after_update_detalle;
+DELIMITER $$
+CREATE TRIGGER trg_adjust_stock_after_update_detalle
+AFTER UPDATE ON detalle_ventas
+FOR EACH ROW
+BEGIN
+    IF OLD.id_producto != NEW.id_producto THEN
+        UPDATE productos SET stock = stock + OLD.cantidad WHERE id_producto = OLD.id_producto;
+        UPDATE productos SET stock = stock - NEW.cantidad WHERE id_producto = NEW.id_producto;
+    ELSEIF OLD.cantidad != NEW.cantidad THEN
+        UPDATE productos SET stock = stock + (OLD.cantidad - NEW.cantidad) WHERE id_producto = NEW.id_producto;
+    END IF;
+END $$
+DELIMITER ;
+
 -- 4. Trigger para evitar la eliminación de una categoría si tiene productos asignados
 DROP TRIGGER IF EXISTS trg_prevent_delete_categoria_with_products;
 DELIMITER $$
@@ -142,10 +171,15 @@ AFTER INSERT ON detalle_ventas
 FOR EACH ROW
 BEGIN
     DECLARE cliente_id INT;
-    SELECT id_cliente INTO cliente_id FROM ventas WHERE id_venta = NEW.id_venta;
-    UPDATE clientes 
-    SET total_gastado = total_gastado + (NEW.cantidad * NEW.precio_unitario_congelado) 
-    WHERE id_cliente = cliente_id;
+    DECLARE venta_estado VARCHAR(50);
+    SELECT id_cliente, estado INTO cliente_id, venta_estado FROM ventas WHERE id_venta = NEW.id_venta;
+    
+    -- Solo acumular si el pedido no está cancelado ni devuelto
+    IF venta_estado NOT IN ('Cancelado', 'Devuelto') THEN
+        UPDATE clientes 
+        SET total_gastado = total_gastado + (NEW.cantidad * NEW.precio_unitario_congelado) 
+        WHERE id_cliente = cliente_id;
+    END IF;
 END $$
 DELIMITER ;
 
@@ -308,7 +342,7 @@ CREATE TRIGGER trg_prevent_self_referral_insert
 BEFORE INSERT ON clientes
 FOR EACH ROW
 BEGIN
-    IF NEW.id_referido IS NOT NULL AND NEW.id_referido = NEW.id_cliente THEN 
+    IF NEW.id_referido IS NOT NULL AND NEW.id_cliente IS NOT NULL AND NEW.id_cliente > 0 AND NEW.id_referido = NEW.id_cliente THEN 
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Un cliente no puede referirse a sí mismo';
     END IF;
 END $$

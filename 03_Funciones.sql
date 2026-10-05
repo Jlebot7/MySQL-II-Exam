@@ -78,10 +78,10 @@ DELIMITER ;
 DELIMITER $$
 -- 5. Formatea el nombre completo del cliente como 'Apellido, Nombre'
 DROP FUNCTION IF EXISTS fn_FormatearNombreCompleto$$
-CREATE FUNCTION fn_FormatearNombreCompleto(p_id_cliente INT) RETURNS VARCHAR(201)
+CREATE FUNCTION fn_FormatearNombreCompleto(p_id_cliente INT) RETURNS VARCHAR(255)
 READS SQL DATA
 BEGIN
-    DECLARE v_nombre_completo VARCHAR(201);
+    DECLARE v_nombre_completo VARCHAR(255);
     SELECT CONCAT(apellido, ', ', nombre) INTO v_nombre_completo
     FROM clientes
     WHERE id_cliente = p_id_cliente;
@@ -338,7 +338,7 @@ BEGIN
     
     IF v_region = 'CDMX' THEN
         SET v_fecha_entrega = DATE_ADD(DATE(v_fecha_venta), INTERVAL 3 DAY);
-    ELSEIF v_region = 'Estado de Mexico' OR v_region = 'EdoMex' THEN
+    ELSEIF v_region IN ('Estado de México', 'Estado de Mexico', 'EdoMex', 'Estado de Méx.', 'Edomex') THEN
         SET v_fecha_entrega = DATE_ADD(DATE(v_fecha_venta), INTERVAL 5 DAY);
     ELSE
         SET v_fecha_entrega = DATE_ADD(DATE(v_fecha_venta), INTERVAL 7 DAY);

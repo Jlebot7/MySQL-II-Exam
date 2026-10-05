@@ -89,18 +89,34 @@ GROUP BY dv1.id_producto, p1.nombre, dv2.id_producto, p2.nombre
 ORDER BY frecuencia DESC
 LIMIT 10;
 
--- 8. Rotación de Inventario: ¿Cuál es la tasa de rotación de stock por categoría (unidades vendidas / stock promedio)?
+-- 8. Rotación de Inventario: Tasa de rotación de stock por categoría (unidades vendidas / stock promedio)
+-- Nota: Se desacopla la agregación de ventas del stock actual de productos para evitar distorsión por JOIN.
+WITH VentasPorCategoria AS (
+    SELECT 
+        p.id_categoria,
+        COALESCE(SUM(dv.cantidad), 0) AS unidades_vendidas
+    FROM productos p
+    JOIN detalle_ventas dv ON p.id_producto = dv.id_producto
+    JOIN ventas v ON dv.id_venta = v.id_venta AND v.estado NOT IN ('Cancelado', 'Devuelto')
+    GROUP BY p.id_categoria
+),
+StockPorCategoria AS (
+    SELECT 
+        id_categoria,
+        ROUND(AVG(stock), 2) AS stock_promedio_categoria
+    FROM productos
+    GROUP BY id_categoria
+)
 SELECT 
     c.id_categoria,
     c.nombre AS categoria,
-    COALESCE(SUM(dv.cantidad), 0) AS unidades_vendidas,
-    AVG(p.stock) AS stock_promedio,
-    COALESCE(SUM(dv.cantidad), 0) / NULLIF(AVG(p.stock), 0) AS tasa_rotacion
+    COALESCE(vc.unidades_vendidas, 0) AS unidades_vendidas,
+    sc.stock_promedio_categoria,
+    ROUND(COALESCE(vc.unidades_vendidas, 0) / NULLIF(sc.stock_promedio_categoria, 0), 2) AS tasa_rotacion
 FROM categorias c
-JOIN productos p ON c.id_categoria = p.id_categoria
-LEFT JOIN detalle_ventas dv ON p.id_producto = dv.id_producto
-LEFT JOIN ventas v ON dv.id_venta = v.id_venta AND v.estado NOT IN ('Cancelado', 'Devuelto')
-GROUP BY c.id_categoria, c.nombre;
+JOIN StockPorCategoria sc ON c.id_categoria = sc.id_categoria
+LEFT JOIN VentasPorCategoria vc ON c.id_categoria = vc.id_categoria
+ORDER BY tasa_rotacion DESC;
 
 -- 9. Productos que Necesitan Reabastecimiento: ¿Qué productos tienen un stock menor a su umbral mínimo?
 SELECT 

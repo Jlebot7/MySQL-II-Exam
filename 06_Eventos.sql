@@ -231,7 +231,7 @@ END$$
 DELIMITER ;
 
 -- 9. evt_aggregate_daily_sales_data
--- Agregar datos de ventas diarias al final de cada día.
+-- Agregar datos de ventas diarias al final de cada día sin distorsión por JOIN.
 DROP EVENT IF EXISTS evt_aggregate_daily_sales_data;
 DELIMITER $$
 CREATE EVENT evt_aggregate_daily_sales_data
@@ -242,12 +242,9 @@ BEGIN
     INSERT INTO resumen_ventas_diarias (fecha, total_ventas, num_transacciones, num_productos_vendidos)
     SELECT 
         CURRENT_DATE,
-        COALESCE(SUM(v.total), 0),
-        COUNT(DISTINCT v.id_venta),
-        COALESCE(SUM(d.cantidad), 0)
-    FROM ventas v
-    LEFT JOIN detalle_ventas d ON v.id_venta = d.id_venta
-    WHERE DATE(v.fecha_venta) = CURRENT_DATE;
+        COALESCE((SELECT SUM(total) FROM ventas WHERE fecha_venta >= CURRENT_DATE AND fecha_venta < CURRENT_DATE + INTERVAL 1 DAY AND estado NOT IN ('Cancelado', 'Devuelto')), 0.00),
+        COALESCE((SELECT COUNT(*) FROM ventas WHERE fecha_venta >= CURRENT_DATE AND fecha_venta < CURRENT_DATE + INTERVAL 1 DAY), 0),
+        COALESCE((SELECT SUM(d.cantidad) FROM detalle_ventas d JOIN ventas v ON d.id_venta = v.id_venta WHERE v.fecha_venta >= CURRENT_DATE AND v.fecha_venta < CURRENT_DATE + INTERVAL 1 DAY), 0);
 END$$
 DELIMITER ;
 
@@ -290,7 +287,7 @@ END$$
 DELIMITER ;
 
 -- 12. evt_update_product_rankings_hourly
--- Actualizar el ranking de los productos más vendidos cada hora.
+-- Actualizar el ranking de los productos más vendidos cada hora usando ROW_NUMBER() estándar.
 DROP EVENT IF EXISTS evt_update_product_rankings_hourly;
 DELIMITER $$
 CREATE EVENT evt_update_product_rankings_hourly
@@ -300,14 +297,12 @@ DO
 BEGIN
     TRUNCATE TABLE ranking_productos;
     
-    SET @pos := 0;
-    
     INSERT INTO ranking_productos (id_producto, total_vendido, ingresos_generados, posicion)
     SELECT 
         id_producto,
         total_qty,
         total_rev,
-        @pos := @pos + 1
+        ROW_NUMBER() OVER (ORDER BY total_qty DESC) AS posicion
     FROM (
         SELECT 
             d.id_producto,
@@ -378,7 +373,7 @@ END$$
 DELIMITER ;
 
 -- 16. evt_refresh_materialized_views_nightly
--- Actualizar la vista materializada simulada (resumen_ventas_diarias acumulado).
+-- Actualizar la vista materializada simulada (resumen_ventas_diarias acumulado) sin inflar totales.
 DROP EVENT IF EXISTS evt_refresh_materialized_views_nightly;
 DELIMITER $$
 CREATE EVENT evt_refresh_materialized_views_nightly
@@ -390,14 +385,29 @@ BEGIN
     
     INSERT INTO resumen_ventas_diarias (fecha, total_ventas, num_transacciones, num_productos_vendidos)
     SELECT 
-        DATE(v.fecha_venta),
-        COALESCE(SUM(v.total), 0),
-        COUNT(DISTINCT v.id_venta),
-        COALESCE(SUM(d.cantidad), 0)
-    FROM ventas v
-    LEFT JOIN detalle_ventas d ON v.id_venta = d.id_venta
-    WHERE v.fecha_venta >= DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)
-    GROUP BY DATE(v.fecha_venta);
+        v_agg.fecha,
+        v_agg.total_ventas,
+        v_agg.num_transacciones,
+        COALESCE(d_agg.num_productos_vendidos, 0)
+    FROM (
+        SELECT 
+            DATE(fecha_venta) AS fecha,
+            SUM(total) AS total_ventas,
+            COUNT(*) AS num_transacciones
+        FROM ventas
+        WHERE fecha_venta >= DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)
+          AND estado NOT IN ('Cancelado', 'Devuelto')
+        GROUP BY DATE(fecha_venta)
+    ) v_agg
+    LEFT JOIN (
+        SELECT 
+            DATE(v.fecha_venta) AS fecha,
+            SUM(d.cantidad) AS num_productos_vendidos
+        FROM detalle_ventas d
+        JOIN ventas v ON d.id_venta = v.id_venta
+        WHERE v.fecha_venta >= DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)
+        GROUP BY DATE(v.fecha_venta)
+    ) d_agg ON v_agg.fecha = d_agg.fecha;
 END$$
 DELIMITER ;
 
@@ -422,7 +432,7 @@ END$$
 DELIMITER ;
 
 -- 18. evt_detect_fraudulent_activity_hourly
--- Detectar posible actividad fraudulenta cada hora (ej: múltiples órdenes canceladas).
+-- Detectar posible actividad fraudulenta cada hora evitando alertas duplicadas para el mismo cliente.
 DROP EVENT IF EXISTS evt_detect_fraudulent_activity_hourly;
 DELIMITER $$
 CREATE EVENT evt_detect_fraudulent_activity_hourly
@@ -432,13 +442,19 @@ DO
 BEGIN
     INSERT INTO actividad_sospechosa (id_cliente, tipo_actividad, descripcion)
     SELECT 
-        id_cliente,
+        v.id_cliente,
         'Múltiples Cancelaciones',
         CONCAT('El cliente ha cancelado ', COUNT(*), ' pedidos en las últimas 24 horas.')
-    FROM ventas
-    WHERE estado = 'Cancelado' 
-      AND fecha_venta >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
-    GROUP BY id_cliente
+    FROM ventas v
+    WHERE v.estado = 'Cancelado' 
+      AND v.fecha_venta >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+      AND NOT EXISTS (
+          SELECT 1 FROM actividad_sospechosa a 
+          WHERE a.id_cliente = v.id_cliente 
+            AND a.tipo_actividad = 'Múltiples Cancelaciones'
+            AND a.fecha_deteccion >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+      )
+    GROUP BY v.id_cliente
     HAVING COUNT(*) > 5;
 END$$
 DELIMITER ;
@@ -463,14 +479,19 @@ BEGIN
         pr.id_proveedor,
         pr.nombre,
         COUNT(DISTINCT p.id_producto),
-        COALESCE(SUM(d.cantidad), 0),
-        COALESCE(SUM(d.cantidad * d.precio_unitario_congelado), 0),
+        COALESCE(SUM(vd.cantidad), 0),
+        COALESCE(SUM(vd.cantidad * vd.precio_unitario_congelado), 0),
         mes_ant,
         anio_ant
     FROM proveedores pr
     LEFT JOIN productos p ON pr.id_proveedor = p.id_proveedor
-    LEFT JOIN detalle_ventas d ON p.id_producto = d.id_producto
-    LEFT JOIN ventas v ON d.id_venta = v.id_venta AND MONTH(v.fecha_venta) = mes_ant AND YEAR(v.fecha_venta) = anio_ant
+    LEFT JOIN (
+        SELECT d.id_producto, d.cantidad, d.precio_unitario_congelado
+        FROM detalle_ventas d
+        JOIN ventas v ON d.id_venta = v.id_venta
+        WHERE MONTH(v.fecha_venta) = mes_ant AND YEAR(v.fecha_venta) = anio_ant
+          AND v.estado NOT IN ('Cancelado', 'Devuelto')
+    ) vd ON p.id_producto = vd.id_producto
     GROUP BY pr.id_proveedor, pr.nombre;
 END$$
 DELIMITER ;
